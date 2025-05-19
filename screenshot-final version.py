@@ -41,8 +41,8 @@ class ScreenCapture:
 
         # 方向镜像映射
         self.mirror_mapping = {
-            'up': 'down',
-            'down': 'up',
+            'up': 'up',
+            'down': 'down',
             'left': 'right',
             'right': 'left',
             'auto': 'auto'
