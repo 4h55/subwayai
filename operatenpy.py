@@ -1,131 +1,212 @@
-import mss
-import cv2
 import numpy as np
-import time
-import keyboard
+import cv2
 import os
-from datetime import datetime  # 新增导入
+import argparse
+import json
+from pathlib import Path
+from tqdm import tqdm  # 用于显示进度条
 
 
-class ScreenCapture:
-    def __init__(self, region=None, output_path="screenshots/"):
-        """初始化屏幕截图工具"""
-        self.region = region or self.get_fullscreen_region()
-        self.output_path = output_path
-        self.frame = None
-        self.last_time = time.time()
-        self.auto_interval = 1.0  # 自动截图间隔（秒）
+class InplaceNpyProcessor:
+    """在同一文件夹内处理 .npy 文件"""
 
-        # 定义5个保存目录
-        self.directories = {
-            'auto': os.path.join(output_path, 'auto'),
-            'up': os.path.join(output_path, 'up'),
-            'down': os.path.join(output_path, 'down'),
-            'left': os.path.join(output_path, 'left'),
-            'right': os.path.join(output_path, 'right')
-        }
+    def __init__(self, input_folders: list, target_size: tuple = (128, 128),
+                 suffix: str = "_resized", processed_log: str = 'processed_files.json'):
+        """
+        初始化处理器3
 
-        # 创建所有目录
-        for dir_path in self.directories.values():
-            os.makedirs(dir_path, exist_ok=True)
+        Args:
+            input_folders: 输入文件夹列表
+            target_size: 目标图像尺寸 (宽, 高)
+            suffix: 处理后文件的后缀，设为空字符串可覆盖原文件
+            processed_log: 已处理文件记录的 JSON 文件路径
+        """
+        self.input_folders = input_folders
+        self.target_size = target_size
+        self.suffix = suffix
+        self.processed_log = processed_log
+        self.processed_files = self._load_processed_log()
 
-        # 按键映射
-        self.key_mapping = {
-            'w': 'up',
-            's': 'down',
-            'a': 'left',
-            'd': 'right'
-        }
-        self.key_states = {key: False for key in self.key_mapping}
+        # 新增：验证目标尺寸是否有效
+        if not all(isinstance(dim, int) and dim > 0 for dim in target_size):
+            raise ValueError(f"无效的目标尺寸: {target_size}，必须为正整数元组")
 
-        # 自动截图计时
-        self.last_auto_save = time.time()
+    def _load_processed_log(self) -> set:
+        """加载已处理文件记录"""
+        if os.path.exists(self.processed_log):
+            try:
+                with open(self.processed_log, 'r') as f:
+                    return set(json.load(f))
+            except Exception as e:
+                print(f"警告: 加载处理记录失败: {e}，将创建新记录")
+        return set()
 
-    def get_fullscreen_region(self):
-        """自动获取全屏区域"""
-        with mss.mss() as sct:
-            return sct.monitors[0]  # 全屏幕区域
+    def _save_processed_log(self) -> None:
+        """保存已处理文件记录"""
+        try:
+            with open(self.processed_log, 'w') as f:
+                json.dump(list(self.processed_files), f)
+        except Exception as e:
+            print(f"警告: 保存处理记录失败: {e}")
 
-    def capture_frame(self):
-        """捕获当前屏幕帧"""
-        with mss.mss() as sct:
-            img = sct.grab(self.region)
-            self.frame = cv2.cvtColor(np.array(img), cv2.COLOR_BGRA2BGR)
-            return self.frame
+    def _is_processed(self, file_path: str) -> bool:
+        """检查文件是否已处理"""
+        return file_path in self.processed_files
 
-    def save_screenshot(self, direction='auto', quality=85):
-        """保存截图到指定目录"""
-        if direction not in self.directories:
-            print(f"无效方向: {direction}")
-            return None
+    def _mark_processed(self, file_path: str) -> None:
+        """标记文件为已处理"""
+        self.processed_files.add(file_path)
+        self._save_processed_log()
 
-        # 使用datetime.now()获取包含微秒的时间戳
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-        dir_path = self.directories[direction]
-        filename = os.path.join(dir_path, f"{direction}_{timestamp}.jpg")
+    def _get_output_path(self, input_path: str) -> str:
+        """获取输出文件路径"""
+        if not self.suffix:
+            return input_path  # 覆盖原文件
 
-        cv2.imwrite(filename, self.frame, [cv2.IMWRITE_JPEG_QUALITY, quality])
-        print(f"截图保存到 {direction}: {filename}")
-        return filename
+        dirname, basename = os.path.split(input_path)
+        root, ext = os.path.splitext(basename)
+        return os.path.join(dirname, f"{root}{self.suffix}{ext}")
 
-    def show_frame(self, window_name="Screen Capture"):
-        """实时显示当前帧"""
-        if self.frame is not None:
-            fps = 1.0 / (time.time() - self.last_time)
-            cv2.putText(self.frame, f"FPS: {fps:.2f}", (10, 30),
-                        cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+    def _process_npy_file(self, input_path: str) -> bool:
+        """处理单个 .npy 文件"""
+        try:
+            # 检查文件是否已处理
+            if self._is_processed(input_path):
+                print(f"跳过已处理文件: {input_path}")
+                return True
 
-            # 显示操作提示
-            cv2.putText(self.frame, "自动保存: 每秒1张 (auto目录)", (10, 60),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-            cv2.putText(self.frame, "按键保存: W=上 S=下 A=左 D=右", (10, 90),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+            # 加载数据
+            data = np.load(input_path)
 
-            cv2.imshow(window_name, self.frame)
-            self.last_time = time.time()
+            # 验证数据形状
+            if data.ndim != 3:
+                print(f"警告: 文件 '{input_path}' 不是三维张量，跳过")
+                return False
 
-    def run(self, show=True):
-        """启动双模式截图（自动+按键）"""
-        print("截图程序启动 - 双模式运行:")
-        print("  自动模式: 每秒保存1张到 auto 目录")
-        print("  按键模式: W/S/A/D 分别保存到 up/down/left/right 目录")
-        print("按 ESC 退出程序")
+            # 新增：打印原始尺寸
+            original_size = (data.shape[2], data.shape[1])  # (宽, 高)
+            print(f"处理前尺寸: {original_size}")
 
-        while not keyboard.is_pressed('esc'):
-            self.capture_frame()
+            # 获取输出路径
+            output_path = self._get_output_path(input_path)
 
-            # 处理自动保存（每秒1次）
-            if time.time() - self.last_auto_save >= self.auto_interval:
-                self.save_screenshot(direction='auto')
-                self.last_auto_save = time.time()
+            # 调整所有图像大小
+            resized_data = np.zeros((data.shape[0], self.target_size[1], self.target_size[0]),
+                                    dtype=data.dtype)
 
-            # 处理按键保存
-            for key, direction in self.key_mapping.items():
-                if keyboard.is_pressed(key) and not self.key_states[key]:
-                    self.key_states[key] = True
-                    self.save_screenshot(direction=direction)
-                elif not keyboard.is_pressed(key):
-                    self.key_states[key] = False
+            for i in range(data.shape[0]):
+                # 使用双三次插值调整单张图像
+                resized_data[i] = cv2.resize(data[i], self.target_size,
+                                             interpolation=cv2.INTER_CUBIC)
 
-            if show:
-                self.show_frame()
-                if cv2.waitKey(1) & 0xFF == 27:
-                    break
+            # 保存结果（如果后缀为空则覆盖原文件）
+            np.save(output_path, resized_data)
 
-            time.sleep(0.01)  # 降低CPU占用
+            # 新增：验证处理后的尺寸
+            if os.path.exists(output_path):
+                try:
+                    test_data = np.load(output_path)
+                    processed_size = (test_data.shape[2], test_data.shape[1])
+                    print(f"处理后尺寸: {processed_size}")
 
-        cv2.destroyAllWindows()
-        print("程序已退出")
+                    if processed_size != self.target_size:
+                        print(f"警告: 处理后尺寸不匹配! 预期: {self.target_size}，实际: {processed_size}")
+                except Exception as e:
+                    print(f"警告: 无法验证处理后文件尺寸: {e}")
+
+            if self.suffix:
+                print(f"已处理: {input_path} -> {output_path}")
+            else:
+                print(f"已处理并覆盖: {input_path}")
+
+            # 标记为已处理
+            self._mark_processed(input_path)
+            return True
+
+        except Exception as e:
+            print(f"错误: 处理文件 '{input_path}' 时发生异常: {e}")
+            return False
+
+    def process(self) -> None:
+        """处理所有文件夹中的 .npy 文件"""
+        # 收集所有 .npy 文件
+        npy_files = []
+
+        for folder in self.input_folders:
+            if not os.path.exists(folder):
+                print(f"警告: 输入文件夹 '{folder}' 不存在，跳过")
+                continue
+
+            print(f"扫描文件夹: {folder}")
+            for root, _, files in os.walk(folder):
+                for file in files:
+                    if file.lower().endswith('.npy'):
+                        npy_files.append(os.path.join(root, file))
+
+        print(f"找到 {len(npy_files)} 个 .npy 文件")
+
+        # 处理所有文件
+        success_count = 0
+        failed_count = 0
+
+        for file_path in tqdm(npy_files, desc="处理进度"):
+            if self._process_npy_file(file_path):
+                success_count += 1
+            else:
+                failed_count += 1
+
+        print(f"处理完成! 成功: {success_count}, 失败: {failed_count}, 已跳过: {len(self.processed_files)}")
 
 
-# 使用示例
+def main():
+    """主函数：解析命令行参数并执行处理"""
+    # 方式一：通过命令行参数传递（保留原有功能）
+    parser = argparse.ArgumentParser(description='在同一文件夹内处理 .npy 文件')
+    parser.add_argument('-i', '--input', nargs='+', required=False,  # 修改为可选参数
+                        help='输入文件夹路径列表，用空格分隔')
+    parser.add_argument('-s', '--size', type=int, nargs=2, default=(224, 224),
+                        metavar=('WIDTH', 'HEIGHT'),
+                        help='目标图像尺寸 (宽, 高)，默认为 224x224')
+    parser.add_argument('--suffix', default='_resized',
+                        help='处理后文件的后缀，设为空字符串可覆盖原文件')
+    parser.add_argument('-l', '--log', default='processed_files.json',
+                        help='已处理文件记录的 JSON 文件路径')
+    parser.add_argument('--force', action='store_true',
+                        help='强制重新处理所有文件，忽略处理记录')
+
+    args = parser.parse_args()
+
+    # 方式二：直接在代码中设置参数值（新增功能）
+    if args.input:
+        # 使用命令行参数
+        processor = InplaceNpyProcessor(
+            input_folders=args.input,
+            target_size=tuple(args.size),
+            suffix=args.suffix,
+            processed_log=args.log
+        )
+    else:
+        # 使用代码中硬编码的参数
+        processor = InplaceNpyProcessor(
+            input_folders=[
+                r"C:\Users\xiang\OneDrive\桌面\subwayai\pythonProject\subwAI-surfer\data\0",
+                r"C:\Users\xiang\OneDrive\桌面\subwayai\pythonProject\subwAI-surfer\data\1",
+                r"C:\Users\xiang\OneDrive\桌面\subwayai\pythonProject\subwAI-surfer\data\2",
+                r"C:\Users\xiang\OneDrive\桌面\subwayai\pythonProject\subwAI-surfer\data\3",
+                r"C:\Users\xiang\OneDrive\桌面\subwayai\pythonProject\subwAI-surfer\data\4"
+            ],
+            target_size=(128, 128),  # 设置为你需要的尺寸
+            suffix="",  # 设为空字符串表示覆盖原文件
+            processed_log='processed_files.json'
+        )
+
+    # 新增：强制重新处理选项
+    if args.force:
+        print("警告: 强制重新处理所有文件，将忽略已有的处理记录")
+        processor.processed_files = set()
+
+    processor.process()
+
+
 if __name__ == "__main__":
-    custom_region = {
-        "top": 0,
-        "left": 0,
-        "width": 2560,
-        "height": 1600
-    }
-
-    sc = ScreenCapture(region=custom_region, output_path="five_directories/")
-    sc.run(show=False)
+    main()

@@ -5,6 +5,9 @@ import time
 import keyboard
 import os
 from datetime import datetime
+import time
+
+time.sleep(10)
 
 
 class ScreenCapture:
@@ -20,11 +23,11 @@ class ScreenCapture:
 
         # 定义保存目录
         self.directories = {
-            'up': os.path.join(output_path, 'up'),
-            'down': os.path.join(output_path, 'down'),
-            'left': os.path.join(output_path, 'left'),
-            'right': os.path.join(output_path, 'right'),
-            'auto': os.path.join(output_path, 'auto')
+            'up': os.path.join(output_path, '4'),
+            'down': os.path.join(output_path, '1'),
+            'left': os.path.join(output_path, '2'),
+            'right': os.path.join(output_path, '3'),
+            'auto': os.path.join(output_path, '0')
         }
 
         # 创建所有目录
@@ -32,7 +35,7 @@ class ScreenCapture:
             os.makedirs(dir_path, exist_ok=True)
 
         # 按键映射
-        self.key_mapping = {'w': 'up', 's': 'down', 'a': 'left', 'd': 'right'}
+        self.key_mapping = {'up': 'up', 'down': 'down', 'left': 'left', 'right': 'right'}
         self.key_states = {key: False for key in self.key_mapping}
 
         # 自动截图计时
@@ -173,15 +176,15 @@ if __name__ == "__main__":
     # 自定义截图区域（示例：全屏）
     custom_region = {
         "top": 0,
-        "left": 0,
-        "width": 3840,  # 屏幕宽度
-        "height": 2160  # 屏幕高度
+        "left": 128,
+        "width": 896,  # 屏幕宽度
+        "height": 768  # 屏幕高度
     }
 
     # 创建实例
     sc = ScreenCapture(
         region=custom_region,
-        output_path=r"C:\Users\4h55\Pictures\ScreenCaptures"
+        output_path=r"C:\Users\xiang\OneDrive\桌面\subwayai\pythonProject\subwAI-surfer\data"
     )
 
     # 启动程序（无窗口显示）

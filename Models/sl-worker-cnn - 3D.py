@@ -1,18 +1,20 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import Dataset, DataLoader, random_split
-import torchvision.transforms as transforms
-import numpy as np
+from torch.utils.data import Dataset, DataLoader
+from torchvision import transforms
+from PIL import Image
 import os
 import glob
 import matplotlib.pyplot as plt
+from torch.utils.data import random_split
+import numpy as np
 
 
 # 数据加载
 class ImageDataset(Dataset):
     def __init__(self, root_dir, transform=None):
-        self.root_dir = root_dir
+        self.root_dir = r"C:\Users\xiang\OneDrive\桌面\subwayai\pythonProject\subwAI-surfer\data"
         self.transform = transform
         self.npy_paths = []  # 存储.npy文件路径
         self.labels = []  # 存储对应标签
@@ -98,15 +100,15 @@ class CNN3DModel(nn.Module):
         # 计算时间注意力权重
         att_weights = self.time_attention(spatial_pool.permute(0, 2, 1))
         fused_features = torch.bmm(spatial_pool, att_weights.unsqueeze(-1)).squeeze(-1)
-        
+
         output = self.fc(fused_features)
         return output
 
 
 # 训练
 def train():
-    data_root = './train_data'  # 数据目录结构：train_data/标签/*.npy
-    batch_size = 32
+    data_root = r"C:\Users\xiang\OneDrive\桌面\subwayai\pythonProject\subwAI-surfer\data"
+    batch_size = 16
     num_epochs = 80
     lr = 0.0005
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -137,7 +139,7 @@ def train():
     # 初始化模型
     model = CNN3DModel(num_classes=len(set(dataset.labels))).to(device)
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=1e-5)
+    optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=1e-4)
     scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(
         optimizer,
         T_0=5,
@@ -216,7 +218,7 @@ def train():
             best_val_loss = epoch_val_loss
             best_model_weights = model.state_dict().copy()
             no_improve_epochs = 0
-            torch.save(best_model_weights, 'models/best_3d_model.pth')
+            torch.save(best_model_weights, r"C:\Users\xiang\OneDrive\桌面\subwayai\pythonProject\subwAI-surfer\weights\3d-dropout-model.pth")
         else:
             no_improve_epochs += 1
 

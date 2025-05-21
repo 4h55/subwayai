@@ -8,11 +8,12 @@ import os
 import glob
 import matplotlib.pyplot as plt
 from torch.utils.data import random_split
+import numpy as np
 
 #数据加载
 class ImageDataset(Dataset):
     def __init__(self, root_dir, transform=None):
-        self.root_dir = root_dir
+        self.root_dir = r"C:\Users\xiang\OneDrive\桌面\subwayai\pythonProject\subwAI-surfer\data"
         self.transform = transform
         self.npy_paths = []  # 存储.npy文件路径
         self.labels = []  # 存储对应标签
@@ -49,66 +50,186 @@ class ImageDataset(Dataset):
         label = self.labels[idx]  # 获取当前样本的标签
         return image_tensor, label
 
-#模型
+
+#深度可分离卷积
+class DepthwiseSeparableConv2d(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0, dilation=1, bias=True):
+        super(DepthwiseSeparableConv2d, self).__init__()
+
+        # 深度卷积
+        self.depthwise = nn.Conv2d(
+            in_channels,
+            in_channels,
+            kernel_size,
+            stride,
+            padding,
+            dilation,
+            groups=in_channels,
+            bias=bias
+        )
+
+        self.bn_depth = nn.BatchNorm2d(in_channels)
+        self.activation = nn.LeakyReLU(0.1, inplace=True)
+
+        # 逐点卷积
+        self.pointwise = nn.Conv2d(
+            in_channels,
+            out_channels,
+            kernel_size=1,
+            stride=1,
+            padding=0,
+            dilation=1,
+            groups=1,
+            bias=bias
+        )
+
+        self.bn_point = nn.BatchNorm2d(out_channels)
+
+    def forward(self, x):
+        x = self.depthwise(x)
+        x = self.bn_depth(x)
+        x = self.activation(x)
+        x = self.pointwise(x)
+        x = self.bn_point(x)
+        x = self.activation(x)
+        return x
+
+
 class TimeFocusedModel(nn.Module):
-    def __init__(self, num_classes=5, time_importance=[1.0, 1.0, 2.0]):
+    def __init__(self, num_classes=5, time_importance=[0.5, 0.3, 3.0], dropout_p=0.3):
         super().__init__()
-        self.time_importance = torch.tensor(time_importance, dtype=torch.float32)
+        self.time_importance = nn.Parameter(
+            torch.tensor(time_importance, dtype=torch.float32),
+            requires_grad=True
+        )
 
-        #2D卷积模块
-        self.img_encoder = nn.Sequential(
-            nn.Conv2d(1, 64, kernel_size=3, padding=1),  # 输入单通道灰度图
+        # 空间卷积
+        self.spatial_encoder = nn.Sequential(
+            nn.Conv2d(1, 32, kernel_size=3, padding=1),
+            nn.BatchNorm2d(32),
+            nn.LeakyReLU(0.1, inplace=True),
+            nn.MaxPool2d(2, 2),
+
+            nn.Conv2d(32, 64, kernel_size=3, padding=1),
             nn.BatchNorm2d(64),
-            nn.ReLU(inplace=True),
+            nn.LeakyReLU(0.1, inplace=True),
             nn.MaxPool2d(2, 2),
 
-            nn.Conv2d(64, 128, kernel_size=3, padding=1),
-            nn.BatchNorm2d(128),
-            nn.ReLU(inplace=True),
+            ResidualBlock(64,64),
+
+            DepthwiseSeparableConv2d(64, 128, kernel_size=3, stride=2, padding=1),
+
+            ResidualBlock(128, 128),
+
+            DepthwiseSeparableConv2d(128, 256, kernel_size=3),
             nn.MaxPool2d(2, 2),
 
-            nn.Conv2d(128, 256, kernel_size=3, padding=1),
-            nn.BatchNorm2d(256),
-            nn.ReLU(inplace=True),
+            ResidualBlock(256, 256),
+
+            nn.Conv2d(256, 640, kernel_size=1),
+            nn.BatchNorm2d(640),
+            nn.LeakyReLU(0.1, inplace=True),
+
+            nn.AdaptiveAvgPool2d((1, 1))
+        )
+
+        # 时间卷积
+        self.time_raw_encoder = nn.Sequential(
+            nn.Conv2d(1, 32, kernel_size=3, stride=2, padding=1),
+            nn.BatchNorm2d(32),
+            nn.LeakyReLU(0.1, inplace=True),
+            nn.MaxPool2d(2, 2),
+
+            nn.Conv2d(32, 32, kernel_size=1),
+            nn.BatchNorm2d(32),
+            nn.LeakyReLU(0.1, inplace=True),
+            nn.MaxPool2d(2, 2),
+
+            nn.Conv2d(32, 64, kernel_size=3, padding=1),
+            nn.BatchNorm2d(64),
+            nn.LeakyReLU(0.1, inplace=True),
+            nn.MaxPool2d(2, 2),
+
             nn.AdaptiveAvgPool2d((1, 1))
         )
 
         # 时间序列1D卷积
         self.time_conv = nn.Sequential(
-            nn.Conv1d(256, 128, kernel_size=3, padding=1),
-            nn.ReLU(inplace=True),
+            nn.Conv1d(in_channels=64, out_channels=128, kernel_size=3, padding=1),
+            nn.BatchNorm1d(128),
+            nn.LeakyReLU(0.1, inplace=True),
             nn.AdaptiveAvgPool1d(1)
         )
 
-        # 分类
+        # 分类器
         self.classifier = nn.Sequential(
-            nn.Linear(256 + 128, 128),
-            nn.ReLU(),
-            nn.Linear(128, num_classes)
+            nn.Linear(640 + 128, 512),
+            nn.BatchNorm1d(512),
+            nn.LeakyReLU(0.1, inplace=True),
+
+            nn.Linear(512,256)
+            nn.BatchNorm1d(256),
+            nn.LeakyReLU(0.1, inplace=True),
+
+            nn.Linear(256, num_classes),
         )
 
     def forward(self, x):
-        # x形状：[B, 3, H, W]
-        time_features = []
+        # 空间特征提取
+        spatial_feat = self.spatial_encoder(x[:, 2:3, :, :])
+        spatial_feat = spatial_feat.flatten(1)
+        spatial_feat = spatial_feat * self.time_importance[2]
+
+        # 时间特征提取
+        time_raw_feats = []
         for t in range(3):
-            img_t = x[:, t:t + 1, :, :]  # 提取单张图片 [B, 1, H, W]
-            feat_t = self.img_encoder(img_t).flatten(1)  # 编码为256维特征 [B, 256]
-            time_features.append(feat_t * self.time_importance[t])
-        time_features = torch.stack(time_features, dim=2)  # [B, 256, 3]（时间维度）
+            raw_feat = self.time_raw_encoder(x[:, t:t + 1, :, :])
+            raw_feat = raw_feat.flatten(1)
+            raw_feat = raw_feat * self.time_importance[t]
+            time_raw_feats.append(raw_feat)
 
-        time_feat = self.time_conv(time_features).squeeze(2)  # [B, 128]
+        time_sequence = torch.stack(time_raw_feats, dim=2)
+        time_feat = self.time_conv(time_sequence).squeeze(2)
 
-        # 增强第三张图片的特征
-        third_feat = time_features[:, :, 2]  # 直接提取第三张的特征 [B, 256]
-
-        combined_feat = torch.cat([third_feat, time_feat], dim=1)  # [B, 256+128]
+        # 特征融合与分类
+        combined_feat = torch.cat([spatial_feat, time_feat], dim=1)
         return self.classifier(combined_feat)
+
+
+# 残差块
+class ResidualBlock(nn.Module):
+    def __init__(self, in_channels, out_channels, reduction=4):
+        super().__init__()
+        bottleneck_channels = out_channels // reduction
+
+        self.conv1 = nn.Conv2d(in_channels, bottleneck_channels, kernel_size=1)
+        self.bn1 = nn.BatchNorm2d(bottleneck_channels)
+        self.conv2 = nn.Conv2d(bottleneck_channels, bottleneck_channels, kernel_size=3, padding=1)
+        self.bn2 = nn.BatchNorm2d(bottleneck_channels)
+        self.conv3 = nn.Conv2d(bottleneck_channels, out_channels, kernel_size=1)
+        self.bn3 = nn.BatchNorm2d(out_channels)
+        self.relu = nn.LeakyReLU(0.1, inplace=True)
+
+        self.shortcut = nn.Sequential()
+        if in_channels != out_channels:
+            self.shortcut = nn.Sequential(
+                nn.Conv2d(in_channels, out_channels, kernel_size=1),
+                nn.BatchNorm2d(out_channels)
+            )
+
+    def forward(self, x):
+        out = self.relu(self.bn1(self.conv1(x)))
+        out = self.relu(self.bn2(self.conv2(out)))
+        out = self.bn3(self.conv3(out))
+        out += self.shortcut(x)
+        out = self.relu(out)
+        return out
 
 
 #训练
 def train():
-    data_root = './train_data'  # 数据目录结构：train_data/标签/*.npy
-    batch_size = 32
+    data_root = r"C:\Users\xiang\OneDrive\桌面\subwayai\pythonProject\subwAI-surfer\data"  # 数据目录结构：train_data/标签/*.npy
+    batch_size = 16
     num_epochs = 80
     lr = 0.0005
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -150,7 +271,7 @@ def train():
     epoch_val_losses = []
 
     best_val_loss = float('inf')
-    patience = 5
+    patience = 7
     no_improve_epochs = 0
     best_model_weights = None
 
@@ -217,7 +338,7 @@ def train():
             best_val_loss = epoch_val_loss
             best_model_weights = model.state_dict().copy()
             no_improve_epochs = 0
-            torch.save(best_model_weights, 'models/best_3d_model.pth')
+            torch.save(best_model_weights, r"C:\Users\xiang\OneDrive\桌面\subwayai\pythonProject\subwAI-surfer\weights\DepthwiseSeparable-model.pth")
         else:
             no_improve_epochs += 1
 
