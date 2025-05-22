@@ -53,7 +53,7 @@ class ImageDataset(Dataset):
 
 
 class CNN3DModel(nn.Module):
-    def __init__(self, num_classes=5, input_channels=1, dropout_rate=0.5):
+    def __init__(self, num_classes=5, input_channels=1, dropout_rate=0.2):
         super(CNN3DModel, self).__init__()
 
         self.cnn3d = nn.Sequential(
@@ -98,11 +98,11 @@ class CNN3DModel(nn.Module):
         self.bias = nn.Parameter(torch.tensor(0.0))
 
         self.classifier = nn.Sequential(
-            nn.Linear(256, 512),
-            nn.BatchNorm1d(512),
+            nn.Linear(256, 128),
+            nn.BatchNorm1d(128),
             nn.SiLU(),
             nn.Dropout(dropout_rate),
-            nn.Linear(512, num_classes)
+            nn.Linear(128, num_classes)
         )
 
         self._initialize_weights()
