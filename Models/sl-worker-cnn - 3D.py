@@ -9,6 +9,7 @@ import glob
 import matplotlib.pyplot as plt
 from torch.utils.data import random_split
 import numpy as np
+import torch.nn.functional as F
 
 
 # 数据加载
@@ -51,61 +52,146 @@ class ImageDataset(Dataset):
         return image_tensor, label
 
 
-# 3DCNN模型
 class CNN3DModel(nn.Module):
-    def __init__(self, num_classes=5):
+    def __init__(self, num_classes=5, input_channels=1, dropout_rate=0.2):
         super(CNN3DModel, self).__init__()
 
-        # 3D卷积
+        # 优化的3D卷积块设计
         self.cnn3d = nn.Sequential(
-            nn.Conv3d(1, 32, kernel_size=(3,3,3), padding=1),
-            nn.BatchNorm3d(32),
-            nn.ReLU(inplace=True),
-            nn.MaxPool3d(kernel_size=(1,2,2), stride=(1,2,2)),
+            # 第一层：使用较小的初始卷积核并增加组归一化
+            nn.Conv3d(input_channels, 32, kernel_size=(3, 3, 3), padding=1, bias=False),
+            nn.GroupNorm(num_groups=4, num_channels=32),
+            nn.SiLU(inplace=True),
+            nn.MaxPool3d(kernel_size=(1, 2, 2), stride=(1, 2, 2)),
+            nn.Dropout3d(dropout_rate / 2),
 
-            nn.Conv3d(32, 64, kernel_size=(3,3,3), padding=1),
+            # 第二层：增加深度可分离卷积
+            DepthwiseSeparableConv3d(32, 64, kernel_size=(3, 3, 3), padding=1),
             nn.BatchNorm3d(64),
-            nn.ReLU(inplace=True),
-            nn.MaxPool3d(kernel_size=(1,2,2), stride=(1,2,2)),
+            nn.SiLU(inplace=True),
+            nn.MaxPool3d(kernel_size=(2, 2, 2), stride=(2, 2, 2)),  # 增加时间维度下采样
+            nn.Dropout3d(dropout_rate / 2),
 
-            nn.Conv3d(64, 128, kernel_size=(3,3,3), padding=1),
-            nn.BatchNorm3d(128),
-            nn.ReLU(inplace=True),
-            nn.MaxPool3d(kernel_size=(1,2,2), stride=(1,2,2)),
+            # 第三层：引入残差连接
+            ResidualBlock(64, 128, kernel_size=(3, 3, 3), padding=1),
+            nn.MaxPool3d(kernel_size=(1, 2, 2), stride=(1, 2, 2)),
+            nn.Dropout3d(dropout_rate),
 
-            nn.Conv3d(128, 256, kernel_size=(3,3,3), padding=1),
+            # 第四层：使用扩张卷积增加感受野
+            nn.Conv3d(128, 256, kernel_size=(3, 3, 3), padding=(1, 2, 2), dilation=(1, 2, 2), bias=False),
             nn.BatchNorm3d(256),
-            nn.ReLU(inplace=True),
-            nn.MaxPool3d(kernel_size=(1,2,2), stride=(1,2,2)),
+            nn.SiLU(inplace=True),
+            nn.AdaptiveAvgPool3d((4, 4, 4)),  # 自适应池化更灵活
+            nn.Dropout3d(dropout_rate),
         )
 
-        # 时间注意力模块
+        # 增强的时间注意力模块
         self.time_attention = nn.Sequential(
-            nn.Linear(256, 128),
-            nn.ReLU(),
-            nn.Linear(128, 1),
+            nn.Conv1d(256, 128, kernel_size=1),
+            nn.BatchNorm1d(128),
+            nn.SiLU(),
+            nn.Conv1d(128, 64, kernel_size=1),
+            nn.BatchNorm1d(64),
+            nn.SiLU(),
+            nn.Conv1d(64, 1, kernel_size=1),
             nn.Flatten(),
             nn.Softmax(dim=1)
         )
 
-        # 引入偏置
-        self.third_weight_bias = nn.Parameter(torch.tensor(2.0))
+        # 引入可学习的缩放因子和偏置
+        self.scale = nn.Parameter(torch.tensor(1.0))
+        self.bias = nn.Parameter(torch.tensor(0.0))
 
-        # 分类
-        self.fc = nn.Linear(256, num_classes)
+        # 改进的分类器
+        self.classifier = nn.Sequential(
+            nn.Linear(256, 128),
+            nn.BatchNorm1d(128),
+            nn.SiLU(),
+            nn.Dropout(dropout_rate),
+            nn.Linear(128, num_classes)
+        )
+
+        # 初始化权重
+        self._initialize_weights()
 
     def forward(self, x):
+        # 特征提取
         features = self.cnn3d(x)
-        spatial_pool = nn.AdaptiveAvgPool3d((3, 1, 1))(features).squeeze(-1).squeeze(-1)
-        # 计算时间注意力权重
-        att_weights = self.time_attention(spatial_pool.permute(0, 2, 1))
-        fused_features = torch.bmm(spatial_pool, att_weights.unsqueeze(-1)).squeeze(-1)
 
-        output = self.fc(fused_features)
+        # 全局平均池化 + 注意力机制
+        batch_size, channels, time_steps, height, width = features.size()
+        spatial_features = features.view(batch_size, channels, time_steps, -1)
+        spatial_pool = torch.mean(spatial_features, dim=-1)  # [B, C, T]
+
+        # 计算时间注意力权重
+        att_weights = self.time_attention(spatial_pool)
+        att_weights = att_weights.view(batch_size, 1, time_steps)
+
+        # 应用注意力
+        fused_features = torch.bmm(spatial_pool, att_weights.transpose(1, 2)).squeeze(-1)
+
+        # 应用缩放和偏置
+        fused_features = self.scale * fused_features + self.bias
+
+        # 分类
+        output = self.classifier(fused_features)
+
         return output
 
+    def _initialize_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Conv3d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.BatchNorm3d) or isinstance(m, nn.GroupNorm):
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.Linear):
+                nn.init.normal_(m.weight, 0, 0.01)
+                nn.init.constant_(m.bias, 0)
 
-# 训练
+
+# 深度可分离卷积模块
+class DepthwiseSeparableConv3d(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size, padding=0):
+        super(DepthwiseSeparableConv3d, self).__init__()
+        self.depthwise = nn.Conv3d(in_channels, in_channels, kernel_size,
+                                   padding=padding, groups=in_channels, bias=False)
+        self.pointwise = nn.Conv3d(in_channels, out_channels, kernel_size=1, bias=False)
+
+    def forward(self, x):
+        x = self.depthwise(x)
+        x = self.pointwise(x)
+        return x
+
+
+# 残差块
+class ResidualBlock(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size, padding=0):
+        super(ResidualBlock, self).__init__()
+        self.conv1 = nn.Conv3d(in_channels, out_channels, kernel_size, padding=padding, bias=False)
+        self.bn1 = nn.BatchNorm3d(out_channels)
+        self.conv2 = nn.Conv3d(out_channels, out_channels, kernel_size, padding=padding, bias=False)
+        self.bn2 = nn.BatchNorm3d(out_channels)
+
+        # 残差连接
+        self.shortcut = nn.Sequential()
+        if in_channels != out_channels:
+            self.shortcut = nn.Sequential(
+                nn.Conv3d(in_channels, out_channels, kernel_size=1, bias=False),
+                nn.BatchNorm3d(out_channels)
+            )
+
+    def forward(self, x):
+        out = F.silu(self.bn1(self.conv1(x)))
+        out = self.bn2(self.conv2(out))
+        out += self.shortcut(x)
+        out = F.silu(out)
+        return out
+
+
+    # 训练
 def train():
     data_root = r"C:\Users\xiang\OneDrive\桌面\subwayai\pythonProject\subwAI-surfer\data"
     batch_size = 16
@@ -137,7 +223,7 @@ def train():
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=4)
 
     # 初始化模型
-    model = CNN3DModel(num_classes=len(set(dataset.labels))).to(device)
+    model = CNN3DModel(num_classes=5).to(device)
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=1e-4)
     scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(
@@ -149,10 +235,14 @@ def train():
 
     epoch_losses = []
     epoch_val_losses = []
+    epoch_accs = []
+    epoch_val_accs = []
 
     best_val_loss = float('inf')
-    patience = 5
+    best_val_acc = -float('inf')
+    patience = 6
     no_improve_epochs = 0
+    no_improve_acc_epochs = 0
     best_model_weights = None
 
     for epoch in range(num_epochs):
@@ -167,7 +257,7 @@ def train():
 
             # 验证输入形状
             if batch_idx == 0 and epoch == 0:
-                print(f"输入形状: {images.shape}（[batch, C, D, H, W]）")  # 应输出类似 [16, 1, 3, 128, 128]
+                print(f"输入形状: {images.shape}（[batch, time_steps, H, W]）")  # 应输出[32, 3, 128, 128]
 
             outputs = model(images)
             loss = criterion(outputs, labels)
@@ -187,7 +277,7 @@ def train():
 
         epoch_loss = running_loss / len(train_loader)
         epoch_acc = 100 * correct / total
-        scheduler.step()
+        epoch_accs.append(epoch_acc)
         epoch_losses.append(epoch_loss)
 
         print(f'\nEpoch [{epoch + 1}/{num_epochs}] Complete: '
@@ -208,42 +298,52 @@ def train():
 
         epoch_val_loss = val_loss_total / len(val_loader)
         epoch_val_losses.append(epoch_val_loss)
+        scheduler.step(epoch_val_loss)
 
         val_acc = 100 * val_correct / len(val_dataset)
+        epoch_val_accs.append(val_acc)
         print(f'Validation Acc: {val_acc:.2f}%, Val Loss: {epoch_val_loss:.4f}')
 
         # 早停机制
-        if epoch_val_loss < best_val_loss:
-            print(f'Validation loss improved from {best_val_loss:.4f} to {epoch_val_loss:.4f}')
-            best_val_loss = epoch_val_loss
-            best_model_weights = model.state_dict().copy()
-            no_improve_epochs = 0
-            torch.save(best_model_weights, r"C:\Users\xiang\OneDrive\桌面\subwayai\pythonProject\subwAI-surfer\weights\3d-dropout-model.pth")
-        else:
-            no_improve_epochs += 1
+        # if epoch_val_loss < best_val_loss:
+        #     best_val_loss = epoch_val_loss
+        #     no_improve_epochs = 0
+        # else:
+        #     no_improve_epochs += 1
 
-        if no_improve_epochs >= patience:
+        if val_acc > best_val_acc:
+            best_val_acc = val_acc
+            best_model_weights = model.state_dict().copy()
+            no_improve_acc_epochs = 0
+        else:
+            no_improve_acc_epochs += 1
+
+        if no_improve_epochs >= patience or no_improve_acc_epochs >= patience:
             print(f'\nEarly stopping triggered at epoch {epoch + 1}!')
             model.load_state_dict(best_model_weights)
-            torch.save(best_model_weights, 'models/best_3d_model.pth')
+            torch.save(best_model_weights,
+                       r"C:\Users\xiang\OneDrive\桌面\subwayai\pythonProject\subwAI-surfer\weights\3dModel.pth")
             break
 
-        print(f'Best validation loss: {best_val_loss:.4f}')
+        print(f'Best validation accuracy: {best_val_acc:.2f}')
 
         # 绘制损失曲线
+        x = list(range(1, epoch + 2))
         ax.clear()
-        ax.plot(range(1, epoch + 2), epoch_losses, 'b-', label='Train Loss')
-        ax.plot(range(1, epoch + 2), epoch_val_losses, 'r-', label='Val Loss')
+        ax.plot(x, epoch_losses, 'b-', label='Train Loss')
+        ax.plot(x, epoch_val_losses, 'r-', label='Val Loss')
+        ax.set_title('Training & Validation Loss')
         ax.set_xlabel('Epoch')
         ax.set_ylabel('Loss')
         ax.legend()
-        plt.draw()
-        plt.pause(0.1)
+        fig.canvas.draw()
+        fig.canvas.flush_events()
+        plt.pause(0.001)
 
     plt.ioff()
     plt.show()
 
-    print('3D CNN训练完成！')
+    print('训练完成！')
 
 
 if __name__ == '__main__':

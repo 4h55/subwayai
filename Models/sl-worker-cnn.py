@@ -1,6 +1,5 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
@@ -53,20 +52,7 @@ class ImageDataset(Dataset):
         return image_tensor, label
 
 
-# 注意力机制
-class SEBlock(nn.Module):
-    def __init__(self, in_channels, se_ratio=0.25):
-        super(SEBlock, self).__init__()
-        mid_channels = int(in_channels * se_ratio)
-        self.squeeze = nn.AdaptiveAvgPool2d(1)
-        self.excitation = nn.Sequential(
-            nn.Conv2d(in_channels, mid_channels, 1, bias=False),
-            nn.Hardswish(),
-            nn.Conv2d(mid_channels, in_channels, 1, bias=False),
-            nn.Sigmoid()
-        )
-
-    def forward(self, x):# 深度可分离卷积
+# 深度可分离卷积
 class DepthwiseSeparableConv2d(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0, dilation=1, bias=True):
         super(DepthwiseSeparableConv2d, self).__init__()
@@ -154,7 +140,7 @@ class TimeFocusedModel(nn.Module):
             nn.Conv2d(32, 32, kernel_size=1),
             nn.BatchNorm2d(32),
             nn.SiLU(),
-            nn.MaxPool2d(2)
+            nn.MaxPool2d(2),
 
             nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),
             nn.BatchNorm2d(64),
@@ -176,14 +162,14 @@ class TimeFocusedModel(nn.Module):
             nn.Linear(640 + 128, 512),
             nn.BatchNorm1d(512),
             nn.SiLU(),
-            nn.Dropout(p=0.1)
+            nn.Dropout(p=0.1),
 
             nn.Linear(512, 256),
             nn.BatchNorm1d(256),
             nn.SiLU(),
-            nn.Dropout(p=0.1)
+            nn.Dropout(p=0.1),
 
-            nn.Linear(256, num_classes),
+            nn.Linear(256, num_classes)
         )
 
     def forward(self, x):
@@ -370,7 +356,7 @@ def train():
             print(f'\nEarly stopping triggered at epoch {epoch + 1}!')
             model.load_state_dict(best_model_weights)
             torch.save(best_model_weights,
-                       r"C:\Users\xiang\OneDrive\桌面\subwayai\pythonProject\subwAI-surfer\weights\CurrentBestModel.pth")
+                       r"C:\Users\xiang\OneDrive\桌面\subwayai\pythonProject\subwAI-surfer\weights\myModel.pth")
             break
 
         print(f'Best validation accuracy: {best_val_acc:.2f}')
