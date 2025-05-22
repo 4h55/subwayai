@@ -52,13 +52,69 @@ class ImageDataset(Dataset):
         return image_tensor, label
 
 
-class CNN3DModel(nn.Module):
-    def __init__(self, num_classes=5, input_channels=1, dropout_rate=0.5):
-        super(CNN3DModel, self).__init__()
+# 1+2D卷积模块
+class Conv1Plus2D(nn.Module):
+    def __init__(self, in_channels, out_channels,
+                 spatial_kernel=(3, 3), spatial_pad=(1, 1),
+                 temporal_kernel=3, temporal_pad=1):
+        super().__init__()
+        self.spatial_conv = nn.Conv2d(
+            in_channels, out_channels,
+            kernel_size=spatial_kernel, padding=spatial_pad, bias=False
+        )
+        self.temporal_conv = nn.Conv1d(
+            out_channels, out_channels,
+            kernel_size=temporal_kernel, padding=temporal_pad, bias=False
+        )
+        self.bn = nn.BatchNorm3d(out_channels)
+        self.act = nn.SiLU(inplace=True)
+
+    def forward(self, x):
+        B, C, T, H, W = x.shape
+        x_flat = x.view(B * T, C, H, W)
+        spatial_feat = self.spatial_conv(x_flat)
+        spatial_feat = spatial_feat.view(B, -1, T, *spatial_feat.shape[-2:])
+        temporal_feat = spatial_feat.permute(0, 1, 3, 4, 2)
+        temporal_feat = temporal_feat.view(B * -1, *temporal_feat.shape[-3:])
+        temporal_feat = self.temporal_conv(temporal_feat)
+        temporal_feat = temporal_feat.view(B, -1, *temporal_feat.shape[-3:]).permute(0, 1, 4, 2, 3)
+        return self.act(self.bn(temporal_feat))
+
+
+# 帧注意力门控
+class FrameAttentionGate(nn.Module):
+    def __init__(self, in_channels, gate_frame_idx=2):
+        super().__init__()
+        self.gate_frame_idx = gate_frame_idx
+        self.attention = nn.Sequential(
+            nn.Conv2d(in_channels, in_channels // 2, kernel_size=1),
+            nn.BatchNorm2d(in_channels // 2),
+            nn.SiLU(),
+            nn.Conv2d(in_channels // 2, 1, kernel_size=1),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        B, C, T, H, W = x.shape
+        target_frame = x[:, :, self.gate_frame_idx, :, :]
+        att_mask = self.attention(target_frame)
+        enhanced_frame = target_frame * att_mask
+        x = x.clone()
+        x[:, :, self.gate_frame_idx, :, :] = enhanced_frame
+        return x
+
+
+class OptimizedCNN3DModel(nn.Module):
+    def __init__(self, num_classes=5, input_channels=1, dropout_rate=0.2):
+        super().__init__()
 
         self.cnn3d = nn.Sequential(
-
-            nn.Conv3d(input_channels, 32, kernel_size=(3, 3, 3), padding=1, bias=False),
+            FrameAttentionGate(in_channels=1),
+            Conv1Plus2D(
+                in_channels=1, out_channels=32,
+                spatial_kernel=(3, 3), spatial_pad=(1, 1),
+                temporal_kernel=3, temporal_pad=1
+            ),
             nn.GroupNorm(num_groups=4, num_channels=32),
             nn.SiLU(inplace=True),
             nn.MaxPool3d(kernel_size=(1, 2, 2), stride=(1, 2, 2)),
@@ -81,7 +137,6 @@ class CNN3DModel(nn.Module):
             nn.Dropout3d(dropout_rate),
         )
 
-        # 时间注意力
         self.time_attention = nn.Sequential(
             nn.Conv1d(256, 128, kernel_size=1),
             nn.BatchNorm1d(128),
@@ -104,38 +159,28 @@ class CNN3DModel(nn.Module):
             nn.Dropout(dropout_rate),
             nn.Linear(512, num_classes)
         )
-
         self._initialize_weights()
 
     def forward(self, x):
         features = self.cnn3d(x)
-
         batch_size, channels, time_steps, height, width = features.size()
         spatial_features = features.view(batch_size, channels, time_steps, -1)
-        spatial_pool = torch.mean(spatial_features, dim=-1)  # [B, C, T]
+        spatial_pool = torch.mean(spatial_features, dim=-1)
 
-        # 计算时间注意力权重
         att_weights = self.time_attention(spatial_pool)
         att_weights = att_weights.view(batch_size, 1, time_steps)
-
-        # 应用注意力
         fused_features = torch.bmm(spatial_pool, att_weights.transpose(1, 2)).squeeze(-1)
-
-        # 应用缩放和偏置
         fused_features = self.scale * fused_features + self.bias
-
-        # 分类
         output = self.classifier(fused_features)
-
         return output
 
     def _initialize_weights(self):
         for m in self.modules():
-            if isinstance(m, nn.Conv3d):
+            if isinstance(m, (nn.Conv3d, nn.Conv2d, nn.Conv1d)):
                 nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
-            elif isinstance(m, nn.BatchNorm3d) or isinstance(m, nn.GroupNorm):
+            elif isinstance(m, (nn.BatchNorm3d, nn.GroupNorm)):
                 nn.init.constant_(m.weight, 1)
                 nn.init.constant_(m.bias, 0)
             elif isinstance(m, nn.Linear):
@@ -195,7 +240,6 @@ def train():
 
     # 数据预处理
     transform = transforms.Compose([
-
         transforms.Normalize(  # 归一化
             mean=[0.5],
             std=[0.5]
@@ -213,7 +257,7 @@ def train():
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=4)
 
     # 初始化模型
-    model = CNN3DModel(num_classes=5).to(device)
+    model = OptimizedCNN3DModel(num_classes=5).to(device)
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
@@ -309,7 +353,7 @@ def train():
             print(f'\nEarly stopping triggered at epoch {epoch + 1}!')
             model.load_state_dict(best_model_weights)
             torch.save(best_model_weights,
-                       r"C:\Users\xiang\OneDrive\桌面\subwayai\pythonProject\subwAI-surfer\weights\3dModel.pth")
+                       r"C:\Users\xiang\OneDrive\桌面\subwayai\pythonProject\subwAI-surfer\weights\1+2Dmodel.pth")
             break
 
         print(f'Best validation accuracy: {best_val_acc:.2f}')
