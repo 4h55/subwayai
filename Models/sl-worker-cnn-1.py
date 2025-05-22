@@ -86,23 +86,18 @@ class TimeFocusedModel(nn.Module):
             nn.BatchNorm2d(32),
             nn.Hardswish(),
 
-            InvertedResidual(32, 32, stride=2, expand_ratio=6),
+            InvertedResidual(32, 32, stride=2, expand_ratio=4),
 
-            InvertedResidual(32, 32, stride=1, expand_ratio=6),
-            InvertedResidual(32, 64, stride=2, expand_ratio=6),
+            InvertedResidual(32, 32, stride=1, expand_ratio=4),
+            InvertedResidual(32, 64, stride=2, expand_ratio=4),
 
-            InvertedResidual(64, 64, stride=1, expand_ratio=6),
-            InvertedResidual(64, 128, stride=2, expand_ratio=6),
-
-            InvertedResidual(128, 128, stride=1, expand_ratio=6),
-            InvertedResidual(128, 256, stride=2, expand_ratio=6),
-
-            InvertedResidual(256, 256, stride=2, expand_ratio=4),
+            InvertedResidual(64, 64, stride=1, expand_ratio=4),
+            InvertedResidual(64, 128, stride=2, expand_ratio=4),
 
             nn.AdaptiveAvgPool2d((1, 1)),
 
-            nn.Conv2d(256, 1024, kernel_size=1),
-            nn.BatchNorm2d(1024),
+            nn.Conv2d(128, 768, kernel_size=1),
+            nn.BatchNorm2d(768),
             nn.Hardswish(),
             nn.AdaptiveAvgPool2d(1)
         )
@@ -113,13 +108,11 @@ class TimeFocusedModel(nn.Module):
             nn.BatchNorm2d(16),
             nn.Hardswish(),
 
-            InvertedResidual(16, 24, stride=2, expand_ratio=6),
-            InvertedResidual(24, 24, stride=1, expand_ratio=6),
+            InvertedResidual(16, 24, stride=2, expand_ratio=4),
 
-            InvertedResidual(24, 32, stride=2, expand_ratio=6),
-            InvertedResidual(32, 32, stride=1, expand_ratio=6),
+            InvertedResidual(24, 32, stride=2, expand_ratio=4),
 
-            InvertedResidual(32, 64, stride=2, expand_ratio=6),
+            InvertedResidual(32, 64, stride=2, expand_ratio=4),
 
             nn.AdaptiveAvgPool2d(1)
         )
@@ -134,17 +127,17 @@ class TimeFocusedModel(nn.Module):
 
         # 分类器
         self.classifier = nn.Sequential(
-            nn.Linear(1024 + 128, 1024),
-            nn.BatchNorm1d(1024),
+            nn.Linear(768 + 128, 512),
+            nn.BatchNorm1d(512),
+            nn.Hardswish(),
+            nn.Dropout(0.3),
+
+            nn.Linear(512,128),
+            nn.BatchNorm1d(128),
             nn.Hardswish(),
             nn.Dropout(0.2),
 
-            nn.Linear(1024,512),
-            nn.BatchNorm1d(512),
-            nn.Hardswish(),
-            nn.Dropout(0.1),
-
-            nn.Linear(512, num_classes),
+            nn.Linear(128, num_classes),
         )
 
     def forward(self, x):
