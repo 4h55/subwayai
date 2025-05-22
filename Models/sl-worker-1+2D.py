@@ -153,11 +153,11 @@ class OptimizedCNN3DModel(nn.Module):
         self.bias = nn.Parameter(torch.tensor(0.0))
 
         self.classifier = nn.Sequential(
-            nn.Linear(256, 512),
-            nn.BatchNorm1d(512),
+            nn.Linear(256, 128),
+            nn.BatchNorm1d(128),
             nn.SiLU(),
             nn.Dropout(dropout_rate),
-            nn.Linear(512, num_classes)
+            nn.Linear(128, num_classes)
         )
         self._initialize_weights()
 
