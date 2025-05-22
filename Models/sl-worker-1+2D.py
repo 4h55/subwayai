@@ -256,13 +256,45 @@ def train():
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=4)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=4)
 
+    def get_optim_params(model):
+        param_groups = []
+        # 收集需要权重衰减的参数（通常是卷积/全连接的权重）
+        decay_params = []
+        # 收集不需要权重衰减的参数（偏置、归一化层参数）
+        no_decay_params = []
+
+        for name, param in model.named_parameters():
+            # 跳过未训练的参数
+            if not param.requires_grad:
+                continue
+            # 识别偏置项（名称包含'bias'）
+            if 'bias' in name:
+                no_decay_params.append(param)
+            # 识别归一化层（名称包含'bn'或'norm'）
+            elif 'bn' in name or 'norm' in name:
+                no_decay_params.append(param)
+            # 其他参数（主要是卷积/全连接权重）
+            else:
+                decay_params.append(param)
+
+        return [
+            {'params': decay_params, 'weight_decay': 5e-5},  # 权重衰减组
+            {'params': no_decay_params, 'weight_decay': 0.0}  # 无权重衰减组
+        ]
+
     # 初始化模型
     model = OptimizedCNN3DModel(num_classes=5).to(device)
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='min', factor=0.5, patience=3
+    optimizer = optim.AdamW(
+        get_optim_params(model),
+        lr=lr,
+        betas=(0.9, 0.999),
+        eps=1e-8,
+        amsgrad=False
     )
+    max_lr = 0.001  # 最大学习率
+    total_steps = num_epochs * len(train_loader)  # 总步数
+    scheduler = optim.lr_scheduler.OneCycleLR(optimizer, max_lr=max_lr, total_steps=total_steps)
 
     epoch_losses = []
     epoch_val_losses = []
